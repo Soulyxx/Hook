@@ -1,167 +1,108 @@
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const store = require('./store');
+'use strict';
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, Events } = require('discord.js');
 
-const OWNER = process.env.OWNER_ID;
-const PANEL_CHANNEL = process.env.PANEL_CHANNEL_ID;
-const PREFIX = process.env.PREFIX || '!';
+const esc = (s) => String(s || '-').replace(/`/g, '\u200b`').slice(0, 60);
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
-  partials: [Partials.Channel]
-});
-
-let panelMessageId = null;
-
-function fmt(ts) { return ts ? `<t:${Math.floor(ts / 1000)}:R>` : '-'; }
-
-function userLine(u) {
-  return `\`${u.hwid.slice(0, 8)}\` **${u.pc || '?'}** · ${u.user || '?'} · ${u.ip || '?'} · seen ${fmt(u.lastSeen)}`;
-}
-
-function panelEmbed(tab) {
-  const e = new EmbedBuilder().setColor(0x2b2d31).setFooter({ text: 'Souly Auth' });
-  if (tab === 'pending') {
-    const list = store.pending();
-    e.setTitle(`Pending requests (${list.length})`);
-    e.setDescription(list.length ? list.map(userLine).join('\n').slice(0, 3900) : 'Nothing pending.');
-  } else if (tab === 'approved') {
-    const list = store.approved();
-    e.setTitle(`Approved users (${list.length})`);
-    e.setDescription(list.length ? list.map(userLine).join('\n').slice(0, 3900) : 'No users.');
-  } else if (tab === 'active') {
-    const list = store.active();
-    e.setTitle(`Active now (${list.length})`);
-    e.setDescription(list.length ? list.map(userLine).join('\n').slice(0, 3900) : 'Nobody online.');
-  } else {
-    const list = store.blacklist();
-    e.setTitle(`Blacklist (${list.length})`);
-    e.setDescription(list.length ? list.map(userLine).join('\n').slice(0, 3900) : 'Blacklist empty.');
+function startBot(store) {
+  const TOKEN = process.env.DISCORD_TOKEN;
+  const OWNER = process.env.OWNER_ID;
+  const CHAN  = process.env.PANEL_CHANNEL_ID;
+  if (!TOKEN || !OWNER || !CHAN) {
+    console.warn('[bot] faltan DISCORD_TOKEN / OWNER_ID / PANEL_CHANNEL_ID');
+    return Promise.resolve(null);
   }
-  return e;
-}
 
-function panelRows() {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('panel:pending').setLabel('Pending').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('panel:approved').setLabel('Approved').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('panel:active').setLabel('Active').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('panel:blacklist').setLabel('Blacklist').setStyle(ButtonStyle.Danger)
-  )];
-}
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Channel]
+  });
 
-async function ensurePanel() {
-  const ch = await client.channels.fetch(PANEL_CHANNEL).catch(() => null);
-  if (!ch) return console.warn('[bot] panel channel not found');
-  const msgs = await ch.messages.fetch({ limit: 20 }).catch(() => null);
-  const mine = msgs ? msgs.find((m) => m.author.id === client.user.id && m.components.length) : null;
-  if (mine) {
-    panelMessageId = mine.id;
-    await mine.edit({ embeds: [panelEmbed('pending')], components: panelRows() }).catch(() => {});
-  } else {
-    const m = await ch.send({ embeds: [panelEmbed('pending')], components: panelRows() });
-    panelMessageId = m.id;
-  }
-}
+  const isOwner = (id) => id === OWNER;
+  const channel = () => client.channels.fetch(CHAN).catch(() => null);
 
-async function notifyPending(u) {
-  const ch = await client.channels.fetch(PANEL_CHANNEL).catch(() => null);
-  if (!ch) return;
-  const e = new EmbedBuilder()
-    .setColor(0xf0a72c)
-    .setTitle('New access request')
+  const embedFor = (u) => new EmbedBuilder()
+    .setTitle('Hook Slx — Access Request')
     .addFields(
-      { name: 'PC', value: u.pc || '?', inline: true },
-      { name: 'User', value: u.user || '?', inline: true },
-      { name: 'IP', value: u.ip || '?', inline: true },
-      { name: 'HWID', value: '`' + u.hwid + '`' }
+      { name: 'HWID', value: '`' + u.hwid + '`' },
+      { name: 'User', value: esc(u.name), inline: true },
+      { name: 'Version', value: esc(u.version), inline: true },
+      { name: 'Status', value: String(u.status), inline: true }
     )
-    .setTimestamp();
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`req:accept:${u.hwid}`).setLabel('Accept').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`req:deny:${u.hwid}`).setLabel('Deny').setStyle(ButtonStyle.Danger)
+    .setColor(u.status === 'approved' ? 0x4ade80 : (u.status === 'denied' || u.status === 'blacklist') ? 0xf87171 : 0xfacc15)
+    .setFooter({ text: 'Hook Slx Auth' })
+    .setTimestamp(new Date());
+
+  const row = (hwid, done) => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('acc:' + hwid).setLabel('Accept').setStyle(ButtonStyle.Success).setDisabled(!!done),
+    new ButtonBuilder().setCustomId('den:' + hwid).setLabel('Deny').setStyle(ButtonStyle.Danger).setDisabled(!!done)
   );
-  await ch.send({ content: OWNER ? `<@${OWNER}>` : '', embeds: [e], components: [row] });
-}
 
-function isOwner(id) { return !OWNER || id === OWNER; }
+  async function notifyNew(u) {
+    const ch = await channel();
+    if (!ch) return;
+    ch.send({ content: `<@${OWNER}> nueva solicitud`, embeds: [embedFor(u)], components: [row(u.hwid)] })
+      .catch((e) => console.error('[bot] post', e.message));
+  }
 
-async function startBot() {
-  client.on('interactionCreate', async (i) => {
+  client.on(Events.InteractionCreate, async (i) => {
     if (!i.isButton()) return;
-    if (!isOwner(i.user.id)) return i.reply({ content: 'Not for you.', ephemeral: true });
+    if (!isOwner(i.user.id)) return i.reply({ content: 'Solo el owner.', ephemeral: true });
+    const [act, hwid] = i.customId.split(':');
+    if (!store.get(hwid)) return i.reply({ content: 'No existe.', ephemeral: true });
+    store.set(hwid, {
+      status: act === 'acc' ? 'approved' : 'denied',
+      decidedAt: Date.now(),
+      decidedBy: i.user.tag
+    });
+    await i.update({ embeds: [embedFor(store.get(hwid))], components: [row(hwid, true)] }).catch(() => {});
+  });
 
-    const [kind, a, b] = i.customId.split(':');
+  client.on(Events.MessageCreate, async (m) => {
+    if (m.author.bot || !m.content.startsWith('!')) return;
+    if (!isOwner(m.author.id) && m.channelId !== CHAN) return;
+    const [cmd, ...args] = m.content.trim().slice(1).split(/\s+/);
+    const arg = (args[0] || '').toUpperCase();
+    const say = (t) => m.reply(t).catch(() => {});
 
-    if (kind === 'panel') {
-      return i.update({ embeds: [panelEmbed(a)], components: panelRows() });
-    }
-    if (kind === 'req') {
-      const u = store.setStatus(b, a === 'accept' ? 'approved' : 'denied');
-      await i.update({
-        embeds: [EmbedBuilder.from(i.message.embeds[0]).setColor(a === 'accept' ? 0x22c26e : 0xff4d5e)
-          .setFooter({ text: a === 'accept' ? 'ACCEPTED' : 'DENIED' })],
-        components: []
-      });
-      if (panelMessageId) {
-        const ch = await client.channels.fetch(PANEL_CHANNEL).catch(() => null);
-        const m = ch && await ch.messages.fetch(panelMessageId).catch(() => null);
-        if (m) m.edit({ embeds: [panelEmbed('pending')], components: panelRows() }).catch(() => {});
+    switch (cmd) {
+      case 'panel': {
+        const ch = await channel(); if (!ch) return say('Canal no encontrado.');
+        const u = store.list();
+        const c = (s) => u.filter((x) => x.status === s).length;
+        return ch.send({ embeds: [new EmbedBuilder()
+          .setTitle('Hook Slx — Auth Panel')
+          .setDescription(`Total: **${u.length}**\nAprobados: **${c('approved')}**\nPendientes: **${c('pending')}**\nBlacklist: **${c('blacklist')}**`)
+          .setColor(0x60a5fa).setTimestamp(new Date())] });
       }
-      return;
+      case 'pending': { const l = store.list().filter((x) => x.status === 'pending');
+        return say(l.length ? l.map((x) => `\`${x.hwid}\` — ${esc(x.name)}`).join('\n') : 'Nada pendiente.'); }
+      case 'users': { const l = store.list();
+        return say(l.length ? l.slice(0, 40).map((x) => `\`${x.hwid}\` ${x.status}`).join('\n') : 'Vacio.'); }
+      case 'active': { const l = store.list().filter((x) => x.status === 'approved');
+        return say(l.length ? l.map((x) => `\`${x.hwid}\` ${esc(x.name)}`).join('\n') : 'Vacio.'); }
+      case 'blacklist': { const l = store.list().filter((x) => x.status === 'blacklist');
+        return say(l.length ? l.map((x) => `\`${x.hwid}\``).join('\n') : 'Vacio.'); }
+      case 'find': {
+        const q = args.join(' ').toUpperCase();
+        const l = store.list().filter((x) => x.hwid.includes(q) || String(x.name || '').toUpperCase().includes(q));
+        return say(l.length ? l.map((x) => `\`${x.hwid}\` ${esc(x.name)} ${x.status}`).join('\n') : 'Nada.');
+      }
+      case 'accept': case 'deny': case 'remove': case 'black': case 'unblack': {
+        if (!arg) return say('Uso: !' + cmd + ' <HWID>');
+        if (!store.get(arg) && cmd !== 'black') return say('No existe: ' + arg);
+        if (cmd === 'accept') store.set(arg, { status: 'approved' });
+        if (cmd === 'deny') store.set(arg, { status: 'denied' });
+        if (cmd === 'remove') store.remove(arg);
+        if (cmd === 'black') store.set(arg, { status: 'blacklist' });
+        if (cmd === 'unblack') store.set(arg, { status: 'pending' });
+        return say('OK: ' + cmd + ' ' + arg);
+      }
+      default: return;
     }
   });
 
-  client.on('messageCreate', async (m) => {
-    if (m.author.bot || !m.content.startsWith(PREFIX) || !isOwner(m.author.id)) return;
-    const [cmd, ...args] = m.content.slice(PREFIX.length).trim().split(/\s+/);
-    const arg = args.join(' ');
-
-    const find = () => {
-      const list = store.byName(arg);
-      return list.length === 1 ? list[0] : null;
-    };
-
-    if (cmd === 'panel') { await ensurePanel(); return m.reply('Panel ready.'); }
-    if (cmd === 'pending') { return m.reply({ embeds: [panelEmbed('pending')] }); }
-    if (cmd === 'users') { return m.reply({ embeds: [panelEmbed('approved')] }); }
-    if (cmd === 'active') { return m.reply({ embeds: [panelEmbed('active')] }); }
-    if (cmd === 'blacklist') { return m.reply({ embeds: [panelEmbed('blacklist')] }); }
-
-    if (cmd === 'accept' || cmd === 'deny') {
-      const u = find() || store.get(arg.toUpperCase());
-      if (!u) return m.reply('Not found (be more specific).');
-      store.setStatus(u.hwid, cmd === 'accept' ? 'approved' : 'denied');
-      return m.reply(`${cmd === 'accept' ? 'Accepted' : 'Denied'}: **${u.pc}**`);
-    }
-    if (cmd === 'remove') {
-      const u = find() || store.get(arg.toUpperCase());
-      if (!u) return m.reply('Not found.');
-      store.remove(u.hwid);
-      return m.reply(`Removed: **${u.pc}** (access revoked)`);
-    }
-    if (cmd === 'black') {
-      const u = find() || store.get(arg.toUpperCase());
-      if (!u) return m.reply('Not found.');
-      store.setStatus(u.hwid, 'blacklisted');
-      return m.reply(`Blacklisted: **${u.pc}**`);
-    }
-    if (cmd === 'unblack') {
-      const u = find() || store.get(arg.toUpperCase());
-      if (!u) return m.reply('Not found.');
-      store.setStatus(u.hwid, 'pending');
-      return m.reply(`Unblacklisted: **${u.pc}** (now pending)`);
-    }
-    if (cmd === 'find') {
-      const list = store.byName(arg);
-      return m.reply(list.length ? list.map(userLine).join('\n') : 'No match.');
-    }
-  });
-
-  await client.login(process.env.DISCORD_TOKEN);
-  await new Promise((r) => client.once('ready', r));
-  console.log('[bot] logged in as ' + client.user.tag);
-  await ensurePanel();
-  return client;
+  client.once(Events.ClientReady, (c) => console.log('[bot] logueado como ' + c.user.tag));
+  return client.login(TOKEN).then(() => ({ notifyNew }));
 }
 
-module.exports = { startBot, notifyPending };
+module.exports = { startBot };

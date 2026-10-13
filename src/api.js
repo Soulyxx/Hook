@@ -1,52 +1,50 @@
+'use strict';
 const express = require('express');
-const store = require('./store');
+const crypto = require('crypto');
 
-let onNewRequest = () => {};
-
-function startApi(bot) {
-  onNewRequest = bot.notifyPending;
-  const app = express();
-  app.use(express.json());
-
-  app.get('/', (_req, res) => res.json({ ok: true, service: 'souly-auth' }));
-
-  app.post('/api/hello', (req, res) => {
-    const { hwid, pc, user, version } = req.body || {};
-    if (!hwid) return res.status(400).json({ error: 'missing hwid' });
-
-    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
-    const existing = store.get(hwid);
-
-    if (existing && existing.status === 'blacklisted') return res.json({ status: 'blacklisted' });
-    if (existing && existing.status === 'denied') return res.json({ status: 'denied' });
-
-    if (existing && existing.status === 'approved') {
-      const u = store.upsert(hwid, { pc, user, version, ip, sessions: (existing.sessions || 0) + 1 });
-      return res.json({ status: 'approved', token: u.token, name: u.pc });
-    }
-
-    const isNew = !existing;
-    const u = store.upsert(hwid, { pc, user, version, ip });
-    if (isNew) {
-      store.log('new request: ' + pc);
-      onNewRequest(u).catch(() => {});
-    }
-    res.json({ status: 'pending' });
-  });
-
-  app.get('/api/verify', (req, res) => {
-    const { hwid, token } = req.query;
-    const u = store.get(hwid);
-    if (!u) return res.json({ ok: false, reason: 'unknown' });
-    if (u.status === 'blacklisted') return res.json({ ok: false, reason: 'blacklisted' });
-    if (u.status !== 'approved') return res.json({ ok: false, reason: u.status });
-    if (u.token !== token) return res.json({ ok: false, reason: 'token' });
-    store.upsert(hwid, {});
-    res.json({ ok: true, name: u.pc });
-  });
-
-  const port = process.env.PORT || 3000;
-  app.listen(port, () => console.log('[api] listening on ' + port));
+function gate(secret) {
+  const sb = Buffer.from(String(secret));
+  return (req, res, next) => {
+    if (!secret) return next();
+    const got = Buffer.from(String(req.get('x-auth-secret') || req.query.k || ''));
+    if (got.length === sb.length && crypto.timingSafeEqual(got, sb)) return next();
+    return res.status(401).json({ ok: false, error: 'bad_secret' });
+  };
 }
 
-module.exports = { startApi };
+module.exports = function apiRouter(store, secret, notify) {
+  const r = express.Router();
+  r.use(gate(secret));
+
+  r.post('/hello', (req, res) => {
+    const hwid = String((req.body && req.body.hwid) || '').toUpperCase();
+    if (hwid.length < 8) return res.status(400).json({ ok: false, error: 'bad_hwid' });
+    const name = String((req.body && req.body.name) || '').slice(0, 32);
+    const version = String((req.body && req.body.version) || '').slice(0, 16);
+
+    let u = store.get(hwid);
+    if (!u) {
+      u = store.set(hwid, { name, version, status: 'pending', token: store.token(), lastSeen: Date.now() });
+      if (notify) notify('new', u);
+      return res.json({ ok: true, status: 'pending', token: u.token });
+    }
+    u = store.set(hwid, { name: name || u.name, version: version || u.version, lastSeen: Date.now() });
+    if (u.status === 'blacklist') return res.json({ ok: true, status: 'denied', reason: 'blacklisted' });
+    if (u.status === 'denied') return res.json({ ok: true, status: 'denied', reason: 'denied' });
+    if (u.status === 'pending') return res.json({ ok: true, status: 'pending', token: u.token });
+    return res.json({ ok: true, status: 'approved', token: u.token });
+  });
+
+  r.get('/verify', (req, res) => {
+    const hwid = String(req.query.hwid || '').toUpperCase();
+    const u = store.get(hwid);
+    if (!u) return res.json({ ok: true, status: 'unknown' });
+    store.set(hwid, { lastSeen: Date.now() });
+    if (u.status === 'blacklist') return res.json({ ok: true, status: 'denied', reason: 'blacklisted' });
+    if (u.status === 'pending') return res.json({ ok: true, status: 'pending' });
+    if (u.status === 'denied') return res.json({ ok: true, status: 'denied', reason: 'denied' });
+    return res.json({ ok: true, status: 'approved', token: u.token });
+  });
+
+  return r;
+};
