@@ -1,0 +1,20 @@
+# deps
+node_modules/
+
+# datos locales (HWIDs, tokens) — en Railway va a /data
+data/
+!data/.gitkeep
+
+# secretos
+.env
+.env.local
+
+# logs / basura
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
