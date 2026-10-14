@@ -8,7 +8,8 @@ class Store {
     this.dir = dir;
     this.file = path.join(dir, 'db.json');
     this.db = { users: {}, meta: {} };
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    try { fs.mkdirSync(dir, { recursive: true }); }
+    catch (e) { console.error('[store] no pude crear ' + dir + ': ' + e.message); }
     this.load();
     this._dirty = false;
     this._t = setInterval(() => { if (this._dirty) this.flush(); }, 4000);
@@ -17,10 +18,7 @@ class Store {
   load() {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.db = {
-        users: (raw && raw.users) || {},
-        meta: (raw && raw.meta) || {}
-      };
+      this.db = { users: (raw && raw.users) || {}, meta: (raw && raw.meta) || {} };
     } catch { this.db = { users: {}, meta: {} }; }
   }
   flush() {
@@ -31,8 +29,6 @@ class Store {
       this._dirty = false;
     } catch (e) { console.error('[store] flush:', e.message); }
   }
-
-  /* ---- usuarios ---- */
   get(hwid) { return this.db.users[hwid]; }
   set(hwid, patch) {
     this.db.users[hwid] = Object.assign({ hwid, created: Date.now() }, this.db.users[hwid] || {}, patch);
@@ -43,8 +39,6 @@ class Store {
   list() { return Object.values(this.db.users); }
   count(status) { return this.list().filter((u) => u.status === status).length; }
   token() { return crypto.randomBytes(24).toString('hex'); }
-
-  /* ---- meta (panel, config runtime) ---- */
   metaGet(k, d = null) { return k in this.db.meta ? this.db.meta[k] : d; }
   metaSet(k, v) { this.db.meta[k] = v; this._dirty = true; return v; }
   metaDel(k) { delete this.db.meta[k]; this._dirty = true; }
