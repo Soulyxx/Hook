@@ -4,10 +4,7 @@ const fs = require('fs');
 
 function tryReq(...p) {
   const tried = [];
-  for (const x of p) {
-    tried.push(x);
-    try { return require(x); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
-  }
+  for (const x of p) { tried.push(x); try { return require(x); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; } }
   console.error('[boot] no pude cargar: ' + tried.join(', '));
   console.error('[boot] en ' + __dirname + ': ' + fs.readdirSync(__dirname).join(', '));
   throw new Error('modulo faltante');
@@ -41,23 +38,16 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '32kb' }));
 app.use(rl);
 
-app.get('/', (_q, r) => r.json({ ok: true, service: 'hook-slx-auth', version: '2.0.0' }));
+app.get('/', (_q, r) => r.json({ ok: true, service: 'hook-slx-auth', version: '3.0.0' }));
 
 app.get('/health', (_q, r) => {
   const b = bot ? bot.status() : null;
   r.json({
-    ok: true,
-    dir: __dirname,
-    db: store.file,
-    dbWritable: store.writable,
-    users: store.list().length,
-    pending: store.count('pending'),
+    ok: true, instanceId: store.instance, db: store.file, dbWritable: store.writable,
+    users: store.list().length, pending: store.count('pending'),
     bot: b ? (b.online ? 'online' : 'offline') : 'disabled',
-    botTag: b ? b.tag : null,
-    intents: b ? b.intents : null,
-    guilds: b ? b.guilds : 0,
-    panel: b ? b.panel : null,
-    secretRequired: !!AUTH_SECRET,
+    botTag: b ? b.tag : null, intents: b ? b.intents : null, guilds: b ? b.guilds : 0,
+    panel: b ? b.panel : null, secretRequired: !!AUTH_SECRET,
     lastError: (b && b.lastError) || bootError || null,
     autoApprove: !!process.env.AUTO_APPROVE
   });
@@ -69,10 +59,10 @@ app.use('/api', apiRouter(store, AUTH_SECRET, (kind, u) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('──────────────────────────────────────────');
-  console.log('[auth] escuchando :' + PORT);
-  console.log('[auth] base        : ' + store.file + (store.writable ? '' : '  <-- SOLO LECTURA'));
-  console.log('[auth] AUTH_SECRET : ' + (AUTH_SECRET ? 'ON' : 'OFF'));
-  console.log('[auth] AUTO_APPROVE: ' + (process.env.AUTO_APPROVE ? 'ON' : 'off'));
+  console.log('[auth] escuchando  :' + PORT);
+  console.log('[auth] instancia    : ' + store.instance);
+  console.log('[auth] base         : ' + store.file + (store.writable ? '' : '  <<< SOLO LECTURA'));
+  console.log('[auth] AUTH_SECRET  : ' + (AUTH_SECRET ? 'ON' : 'OFF'));
   console.log('──────────────────────────────────────────');
 });
 
