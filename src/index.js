@@ -1,24 +1,34 @@
 'use strict';
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 function tryReq(...p) {
-  for (const x of p) { try { return require(x); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; } }
-  throw new Error('Modulo no encontrado: ' + p.join(' | '));
+  const tried = [];
+  for (const x of p) {
+    tried.push(x);
+    try { return require(x); }
+    catch (e) { if (e.code !== 'MODULE_NOT_FOUND' || !e.message.includes(x)) throw e; }
+  }
+  console.error('[boot] no pude cargar ninguno de: ' + tried.join(', '));
+  console.error('[boot] en ' + __dirname + ': ' + fs.readdirSync(__dirname).join(', '));
+  throw new Error('modulo faltante: ' + p.join(' | '));
 }
 
-const { Store }    = tryReq('./src/store', './store');
-const apiRouter    = tryReq('./src/api', './api');
-const { startBot } = tryReq('./src/bot', './bot');
+const { Store }    = tryReq('./store', './src/store');
+const apiRouter    = tryReq('./api', './src/api');
+const { startBot } = tryReq('./bot', './src/bot');
 
 const PORT        = process.env.PORT || 3000;
 const DATA_DIR    = process.env.DATA_DIR || './data';
 const AUTH_SECRET = process.env.AUTH_SECRET || '';
 
+console.log('[boot] __dirname = ' + __dirname);
+
 const store = new Store(DATA_DIR);
 let bot = null;
 let bootError = null;
 
-/* ---------- rate limit simple ---------- */
 const hits = new Map();
 function rl(req, res, next) {
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'x';
@@ -35,12 +45,13 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '32kb' }));
 app.use(rl);
 
-app.get('/', (_q, r) => r.json({ ok: true, service: 'hook-slx-auth', version: '1.2.0' }));
+app.get('/', (_q, r) => r.json({ ok: true, service: 'hook-slx-auth', version: '1.3.0' }));
 
 app.get('/health', (_q, r) => {
   const b = bot ? bot.status() : null;
   r.json({
     ok: true,
+    dir: __dirname,
     users: store.list().length,
     pending: store.count('pending'),
     bot: b ? (b.online ? 'online' : 'offline') : 'disabled',
@@ -58,7 +69,6 @@ app.use('/api', apiRouter(store, AUTH_SECRET, (kind, u) => {
   if (kind === 'new' && bot) bot.notifyNew(u).catch((e) => console.error('[bot] notify:', e.message));
 }));
 
-/* ---------- HTTP PRIMERO (healthcheck de Railway) ---------- */
 app.listen(PORT, '0.0.0.0', () => {
   console.log('──────────────────────────────────────────');
   console.log('[auth] escuchando en :' + PORT);
@@ -71,7 +81,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('──────────────────────────────────────────');
 });
 
-/* ---------- bot en paralelo ---------- */
 startBot(store)
   .then((b) => { bot = b; if (!b) console.warn('[auth] bot DESACTIVADO (sin token)'); })
   .catch((e) => { bootError = e.message; console.error('[bot] arranque fallo:', e.message); });
