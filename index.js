@@ -1,5 +1,4 @@
 'use strict';
-/* Entrypoint de raiz. Carga la app este donde este. */
 const fs = require('fs');
 const path = require('path');
 
@@ -23,8 +22,7 @@ function findEntry() {
 
 const entry = findEntry();
 if (!entry) {
-  console.error('[boot] NO encontre entrypoint.');
-  console.error('[boot] __dirname = ' + __dirname);
+  console.error('[boot] NO encontre entrypoint en ' + __dirname);
   try { console.error('[boot] contenido: ' + fs.readdirSync(__dirname).join(', ')); } catch {}
   process.exit(1);
 }

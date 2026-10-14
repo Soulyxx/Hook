@@ -6,7 +6,7 @@ const {
 
 const HWID_RE = /^[A-Z0-9]{8,64}$/;
 const clean = (s) => String(s || '-').replace(/`/g, "'").slice(0, 60);
-const short = (h) => h.slice(0, 8);
+const short = (h) => String(h || '').slice(0, 8);
 
 function sanitizeToken(t) { return String(t || '').replace(/\s+/g, '').replace(/^Bot/i, ''); }
 function tokenBotId(tok) {
@@ -21,16 +21,18 @@ const hwidOption = (o) => o.setName('hwid').setDescription('HWID').setRequired(t
 
 const COMMANDS = [
   new SlashCommandBuilder().setName('panel').setDescription('Envia el panel de control'),
-  new SlashCommandBuilder().setName('setup').setDescription('Fija el canal del panel')
+  new SlashCommandBuilder().setName('setup').setDescription('Fija el canal de logs')
     .addChannelOption((o) => o.setName('canal').setDescription('Canal de texto').addChannelTypes(ChannelType.GuildText)),
   new SlashCommandBuilder().setName('pending').setDescription('Solicitudes pendientes'),
   new SlashCommandBuilder().setName('users').setDescription('Todos los usuarios'),
   new SlashCommandBuilder().setName('active').setDescription('Usuarios aprobados'),
   new SlashCommandBuilder().setName('blacklist').setDescription('Blacklist'),
   new SlashCommandBuilder().setName('stats').setDescription('Estadisticas'),
-  new SlashCommandBuilder().setName('diag').setDescription('Diagnostico del bot'),
+  new SlashCommandBuilder().setName('logs').setDescription('Ultimos eventos de la base'),
+  new SlashCommandBuilder().setName('diag').setDescription('Diagnostico'),
   new SlashCommandBuilder().setName('find').setDescription('Buscar por HWID o nombre')
     .addStringOption((o) => o.setName('texto').setDescription('Texto').setRequired(true)),
+  new SlashCommandBuilder().setName('repost').setDescription('Reenvia la solicitud de un HWID').addStringOption(hwidOption),
   new SlashCommandBuilder().setName('accept').setDescription('Aprobar HWID').addStringOption(hwidOption),
   new SlashCommandBuilder().setName('deny').setDescription('Denegar HWID').addStringOption(hwidOption),
   new SlashCommandBuilder().setName('reset').setDescription('Volver a pendiente').addStringOption(hwidOption),
@@ -52,7 +54,7 @@ function panelEmbed(store) {
       `Denegados: **${c('denied')}**`,
       `Blacklist: **${c('blacklist')}**`,
       '',
-      'Usa los botones de cada solicitud, o `/accept`, `/deny`, `/black`.'
+      'Acepta o deniega con los botones de cada solicitud.'
     ].join('\n'))
     .setColor(0x3ea6ff)
     .setFooter({ text: 'Hook Slx Auth • panel' })
@@ -63,7 +65,7 @@ function userEmbed(u, done) {
   const color = u.status === 'approved' ? 0x22c26e
     : (u.status === 'denied' || u.status === 'blacklist') ? 0xff4d5e : 0xf0a72c;
   return new EmbedBuilder()
-    .setTitle(done ? 'Hook Slx — Solicitud (decidida)' : 'Hook Slx — Nueva solicitud')
+    .setTitle(done ? 'Hook Slx — Solicitud decidida' : 'Hook Slx — Nueva solicitud')
     .addFields(
       { name: 'HWID', value: '`' + u.hwid + '`' },
       { name: 'Usuario', value: clean(u.name), inline: true },
@@ -77,8 +79,8 @@ function userEmbed(u, done) {
 
 function userButtons(hwid, done) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('acc:' + hwid).setLabel('Accept').setStyle(ButtonStyle.Success).setDisabled(!!done),
-    new ButtonBuilder().setCustomId('den:' + hwid).setLabel('Deny').setStyle(ButtonStyle.Danger).setDisabled(!!done),
+    new ButtonBuilder().setCustomId('acc:' + hwid).setLabel('Aceptar').setStyle(ButtonStyle.Success).setDisabled(!!done),
+    new ButtonBuilder().setCustomId('den:' + hwid).setLabel('Denegar').setStyle(ButtonStyle.Danger).setDisabled(!!done),
     new ButtonBuilder().setCustomId('blk:' + hwid).setLabel('Blacklist').setStyle(ButtonStyle.Secondary).setDisabled(!!done)
   );
 }
@@ -88,16 +90,11 @@ function startBot(store) {
   const OWNER  = String(process.env.OWNER_ID || '').trim();
   const ADMINS = String(process.env.ADMIN_IDS || '').split(',').map((x) => x.trim()).filter(Boolean);
 
-  if (!TOKEN) {
-    console.warn('[bot] DISCORD_TOKEN ausente -> bot desactivado');
-    return Promise.resolve(null);
-  }
+  if (!TOKEN) { console.warn('[bot] DISCORD_TOKEN ausente -> bot desactivado'); return Promise.resolve(null); }
 
-  const botId = tokenBotId(TOKEN);
-  console.log('[bot] token -> bot id ' + (botId || 'DESCONOCIDO (token malformado)'));
+  console.log('[bot] token -> bot id ' + (tokenBotId(TOKEN) || 'DESCONOCIDO'));
 
-  const state = { online: false, tag: null, id: botId, guilds: 0, panel: null, lastError: null, intents: 'Guilds' };
-
+  const state = { online: false, tag: null, id: tokenBotId(TOKEN), guilds: 0, panel: null, lastError: null, intents: 'Guilds' };
   let client = null;
   let wantMsgContent = String(process.env.PREFIX_COMMANDS || 'false') === 'true';
 
@@ -118,152 +115,136 @@ function startBot(store) {
     }
     const envId = String(process.env.PANEL_CHANNEL_ID || '').trim();
     if (envId) {
-      const ch = await client.channels.fetch(envId).catch((e) => {
-        console.warn('[bot] PANEL_CHANNEL_ID ' + envId + ' no accesible: ' + e.message);
-        return null;
-      });
+      const ch = await client.channels.fetch(envId).catch((e) => { console.warn('[bot] canal ' + envId + ': ' + e.message); return null; });
       if (ch && ch.isTextBased()) { store.metaSet('panelChannelId', ch.id); return ch; }
     }
-    const names = ['hook-slx', 'hookslx', 'hook-slx-panel', 'panel', 'auth', 'accesos'];
+    const names = ['logs-hook', 'hook-logs', 'hook-slx', 'hookslx', 'panel', 'auth', 'accesos'];
     for (const g of client.guilds.cache.values()) {
       const f = g.channels.cache.find((c) => c.isTextBased() && names.includes(c.name.toLowerCase()));
-      if (f) { store.metaSet('panelChannelId', f.id); console.log('[bot] panel auto -> #' + f.name); return f; }
+      if (f) { store.metaSet('panelChannelId', f.id); console.log('[bot] canal auto -> #' + f.name); return f; }
     }
     for (const g of client.guilds.cache.values()) {
       const me = g.members.me;
       const f = g.channels.cache.find((c) => c.type === ChannelType.GuildText && me &&
         c.permissionsFor(me).has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]));
-      if (f) { store.metaSet('panelChannelId', f.id); console.log('[bot] panel auto -> #' + f.name); return f; }
+      if (f) { store.metaSet('panelChannelId', f.id); console.log('[bot] canal auto -> #' + f.name); return f; }
     }
     return null;
   }
 
   async function ensurePanel(force = false) {
     const ch = await resolveChannel(force);
-    if (!ch) { console.warn('[bot] sin canal de panel'); return null; }
+    if (!ch) { console.warn('[bot] sin canal'); return null; }
     const perms = ch.permissionsFor(ch.guild.members.me);
     const missing = [];
     if (!perms.has(PermissionFlagsBits.SendMessages)) missing.push('Send Messages');
     if (!perms.has(PermissionFlagsBits.EmbedLinks)) missing.push('Embed Links');
     if (missing.length) console.warn('[bot] faltan permisos en #' + ch.name + ': ' + missing.join(', '));
-
     state.panel = ch.id;
     const mid = store.metaGet('panelMessageId');
     if (mid && !force) {
       const m = await ch.messages.fetch(mid).catch(() => null);
       if (m) { await m.edit({ embeds: [panelEmbed(store)] }).catch(() => {}); return m; }
     }
-    const m = await ch.send({ embeds: [panelEmbed(store)] })
-      .catch((e) => { console.error('[bot] panel send:', e.message); return null; });
+    const m = await ch.send({ embeds: [panelEmbed(store)] }).catch((e) => { console.error('[bot] panel:', e.message); return null; });
     if (m) { store.metaSet('panelMessageId', m.id); m.pin().catch(() => {}); }
     return m;
   }
 
   async function notifyNew(u) {
-    if (!state.online) { console.warn('[bot] offline -> ' + u.hwid + ' no notificado'); return; }
+    if (!state.online) { console.warn('[bot] offline -> ' + u.hwid + ' sin notificar'); return null; }
     const ch = await resolveChannel();
-    if (!ch) { console.error('[bot] sin canal -> ' + u.hwid + ' sin notificar'); return; }
-    await ch.send({
+    if (!ch) { console.error('[bot] sin canal -> ' + u.hwid + ' sin notificar'); return null; }
+    const m = await ch.send({
       content: OWNER ? `<@${OWNER}> nueva solicitud` : 'Nueva solicitud',
       embeds: [userEmbed(u, false)],
       components: [userButtons(u.hwid, false)]
-    }).catch((e) => console.error('[bot] notify:', e.message));
+    }).catch((e) => { console.error('[bot] notify:', e.message); return null; });
+    if (m) { store.set(u.hwid, { notifiedAt: Date.now(), notifyMessageId: m.id }); await ensurePanel(); }
+    return m;
   }
 
   async function registerIn(guild) {
-    try {
-      await guild.commands.set(COMMANDS.map((c) => c.toJSON()));
-      console.log('[bot] comandos OK en "' + guild.name + '"');
-    } catch (e) {
-      if (e.code === 50001 || e.status === 403) {
-        console.error('[bot] NO registro comandos en "' + guild.name + '": falta el scope applications.commands. ' +
-          'Reinvita el bot con scopes bot + applications.commands.');
-      } else console.error('[bot] registrar en "' + guild.name + '": ' + e.message);
+    try { await guild.commands.set(COMMANDS.map((c) => c.toJSON())); console.log('[bot] comandos OK en "' + guild.name + '"'); }
+    catch (e) {
+      if (e.code === 50001 || e.status === 403) console.error('[bot] falta el scope applications.commands en "' + guild.name + '"');
+      else console.error('[bot] registrar en "' + guild.name + '": ' + e.message);
     }
   }
   const registerAll = async () => { for (const g of client.guilds.cache.values()) await registerIn(g); };
 
   function attach(c) {
-    c.on(Events.Error, (e) => { state.lastError = e.message; console.error('[bot] client error:', e.message); });
+    c.on(Events.Error, (e) => { state.lastError = e.message; console.error('[bot] error:', e.message); });
     c.on(Events.Warn, (m) => console.warn('[bot] warn:', m));
-    c.on(Events.ShardDisconnect, (e, id) => console.warn('[bot] shard ' + id + ' desconectado (code ' + e.code + ')'));
-    c.on(Events.ShardError, (e, id) => { state.lastError = e.message; console.error('[bot] shard ' + id + ' error:', e.message); });
-    c.on(Events.Invalidated, () => { state.online = false; console.error('[bot] SESION INVALIDADA -> reinicia el servicio'); });
-    if (String(process.env.DEBUG_GATEWAY || 'false') === 'true') c.on(Events.Debug, (m) => console.log('[gw] ' + m));
+    c.on(Events.ShardDisconnect, (e, id) => console.warn('[bot] shard ' + id + ' caido (' + e.code + ')'));
+    c.on(Events.ShardError, (e) => { state.lastError = e.message; console.error('[bot] shard:', e.message); });
+    c.on(Events.Invalidated, () => { state.online = false; console.error('[bot] SESION INVALIDADA'); });
 
     c.once(Events.ClientReady, async (me) => {
       state.online = true; state.tag = me.user.tag; state.id = me.user.id; state.guilds = c.guilds.cache.size;
-      console.log('[bot] ONLINE como ' + me.user.tag + ' (' + me.user.id + ') en ' + state.guilds + ' guild(s)');
-      console.log('[bot] intents: ' + state.intents);
-      if (state.guilds === 0) console.warn('[bot] el bot no esta en ningun server -> invitalo');
+      console.log('[bot] ONLINE como ' + me.user.tag + ' en ' + state.guilds + ' guild(s)');
       await registerAll();
       await ensurePanel();
+      /* re-avisa solicitudes pendientes que quedaron sin mensaje */
+      for (const u of store.list()) {
+        if (u.status === 'pending' && !u.notifiedAt) { await notifyNew(u); await new Promise((r) => setTimeout(r, 400)); }
+      }
       if (OWNER) {
-        const u = await c.users.fetch(OWNER).catch(() => null);
-        if (u) console.log('[bot] owner OK: ' + u.tag);
-        else console.warn('[bot] OWNER_ID ' + OWNER + ' no resuelve');
-      } else console.warn('[bot] OWNER_ID vacio -> staff = quien tenga Manage Server');
+        const o = await c.users.fetch(OWNER).catch(() => null);
+        if (!o) console.warn('[bot] OWNER_ID ' + OWNER + ' no resuelve');
+      }
     });
 
-    c.on(Events.GuildCreate, async (g) => {
-      console.log('[bot] invitado a "' + g.name + '"');
-      await registerIn(g);
-      if (!store.metaGet('panelChannelId')) await ensurePanel(true);
-    });
+    c.on(Events.GuildCreate, async (g) => { await registerIn(g); if (!store.metaGet('panelChannelId')) await ensurePanel(true); });
 
     c.on(Events.InteractionCreate, async (i) => {
-      if (i.isAutocomplete()) {
-        try {
+      try {
+        if (i.isAutocomplete()) {
           const q = String(i.options.getFocused() || '').toUpperCase();
           const pool = ['accept', 'deny', 'reset', 'black'].includes(i.commandName)
             ? store.list().filter((u) => u.status !== 'approved') : store.list();
-          await i.respond(pool
+          return i.respond(pool
             .filter((u) => u.hwid.includes(q) || String(u.name || '').toUpperCase().includes(q))
             .slice(0, 25)
             .map((u) => ({ name: `${short(u.hwid)}… · ${clean(u.name)} · ${u.status}`, value: u.hwid })));
-        } catch (e) { console.error('[bot] autocomplete:', e.message); }
-        return;
-      }
+        }
 
-      if (i.isButton()) {
-        try {
-          const staff = i.member ? isStaff({ id: i.user.id, permissions: i.member.permissions }) : (i.user.id === OWNER);
+        const staff = i.member ? isStaff({ id: i.user.id, permissions: i.member.permissions }) : (i.user.id === OWNER);
+
+        if (i.isButton()) {
           if (!staff) return i.reply({ content: 'Solo el owner puede decidir.', ephemeral: true });
           const [act, hwid] = i.customId.split(':');
           if (!store.get(hwid)) return i.reply({ content: 'Ese HWID ya no existe.', ephemeral: true });
-          store.set(hwid, { status: { acc: 'approved', den: 'denied', blk: 'blacklist' }[act], decidedAt: Date.now(), decidedBy: i.user.tag });
+          const map = { acc: 'approved', den: 'denied', blk: 'blacklist' };
+          store.set(hwid, { status: map[act], decidedAt: Date.now(), decidedBy: i.user.tag });
+          store.log(map[act], hwid, i.user.tag);
+          console.log('[bot] ' + map[act] + ' ' + hwid + ' por ' + i.user.tag);
           await i.update({ embeds: [userEmbed(store.get(hwid), true)], components: [userButtons(hwid, true)] }).catch(() => {});
           await ensurePanel();
-        } catch (e) { console.error('[bot] button:', e.message); }
-        return;
-      }
+          return;
+        }
 
-      if (!i.isChatInputCommand()) return;
-      try {
-        const staff = i.member ? isStaff({ id: i.user.id, permissions: i.member.permissions }) : (i.user.id === OWNER);
+        if (!i.isChatInputCommand()) return;
         const say = (p) => i.reply(typeof p === 'string' ? { content: p, ephemeral: true } : { ...p, ephemeral: true });
         const hwid = String(i.options.getString('hwid') || '').toUpperCase();
 
         if (i.commandName === 'help') {
-          return say(['**Hook Slx Auth**',
-            '`/panel` `/setup #canal` `/sync` `/diag` `/stats`',
-            '`/pending` `/users` `/active` `/blacklist` `/find`',
+          return say(['**Hook Slx Auth**', '`/panel` `/setup #canal` `/sync` `/diag` `/stats` `/logs`',
+            '`/pending` `/users` `/active` `/blacklist` `/find` `/repost`',
             '`/accept` `/deny` `/reset` `/black` `/unblack` `/remove`'].join('\n'));
         }
 
         if (i.commandName === 'diag') {
           const ch = await resolveChannel();
-          const me = i.guild ? i.guild.members.me : null;
-          const perms = (ch && me) ? ch.permissionsFor(me) : null;
           return say({ embeds: [new EmbedBuilder().setTitle('Diagnostico')
             .addFields(
               { name: 'Bot', value: `${state.tag} (\`${state.id}\`)`, inline: true },
               { name: 'Online', value: String(state.online), inline: true },
               { name: 'Guilds', value: String(state.guilds), inline: true },
-              { name: 'Intents', value: state.intents, inline: true },
-              { name: 'Panel', value: ch ? '<#' + ch.id + '>' : 'no resuelto', inline: true },
-              { name: 'Perms canal', value: perms ? (perms.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks]) ? 'OK' : 'FALTAN') : '-', inline: true },
-              { name: 'Ultimo error', value: state.lastError ? String(state.lastError).slice(0, 120) : 'ninguno' }
+              { name: 'Base', value: store.file || '-', inline: false },
+              { name: 'Usuarios', value: String(store.list().length), inline: true },
+              { name: 'Canal', value: ch ? '<#' + ch.id + '>' : 'no resuelto', inline: true },
+              { name: 'Ultimo error', value: state.lastError ? String(state.lastError).slice(0, 110) : 'ninguno' }
             ).setColor(0x3ea6ff).setTimestamp(new Date())] });
         }
 
@@ -281,14 +262,24 @@ function startBot(store) {
             if (!ch || !ch.isTextBased()) return say('Canal invalido.');
             store.metaSet('panelChannelId', ch.id); store.metaDel('panelMessageId');
             await ensurePanel(true);
-            return say('Canal del panel: <#' + ch.id + '>.');
+            return say('Canal de logs: <#' + ch.id + '>.');
           }
           case 'sync': await ensurePanel(true); return say('Panel recreado.');
+          case 'logs': {
+            const l = store.logs(20);
+            return say(l.length ? l.map((x) => `\`${new Date(x.t).toISOString().slice(11, 19)}\` **${x.type}** ${x.hwid ? '`' + short(x.hwid) + '…`' : ''} ${x.by || ''}`).join('\n') : 'Sin eventos.');
+          }
           case 'stats': {
             const c2 = (s) => store.count(s);
             return say({ embeds: [new EmbedBuilder().setTitle('Estadisticas')
               .setDescription(`Total **${store.list().length}** · Aprobados **${c2('approved')}** · Pendientes **${c2('pending')}** · Denegados **${c2('denied')}** · Blacklist **${c2('blacklist')}**`)
               .setColor(0x3ea6ff)] });
+          }
+          case 'repost': {
+            if (!store.get(hwid)) return say('No existe: ' + hwid);
+            store.set(hwid, { notifiedAt: 0 });
+            await notifyNew(store.get(hwid));
+            return say('Reenviado: ' + hwid);
           }
           case 'pending': {
             const l = store.list().filter((u) => u.status === 'pending');
@@ -296,7 +287,7 @@ function startBot(store) {
           }
           case 'users': {
             const l = store.list().slice(0, 40);
-            return say(l.length ? l.map((u) => `\`${u.hwid}\` · ${u.status}`).join('\n') : 'Vacio.');
+            return say(l.length ? l.map((u) => `\`${u.hwid}\` · ${u.status} · ${clean(u.name)}`).join('\n') : 'Vacio.');
           }
           case 'active': {
             const l = store.list().filter((u) => u.status === 'approved');
@@ -315,17 +306,15 @@ function startBot(store) {
             if (!HWID_RE.test(hwid)) return say('HWID invalido: ' + (hwid || '(vacio)'));
             if (!store.get(hwid) && i.commandName !== 'black') return say('No existe: ' + hwid);
             const now = Date.now();
-            if (i.commandName === 'accept')  { store.set(hwid, { status: 'approved', decidedAt: now, decidedBy: i.user.tag }); return say('Aprobado: ' + hwid); }
-            if (i.commandName === 'deny')    { store.set(hwid, { status: 'denied', decidedAt: now, decidedBy: i.user.tag }); return say('Denegado: ' + hwid); }
-            if (i.commandName === 'reset')   { store.set(hwid, { status: 'pending', decidedAt: null }); return say('A pendiente: ' + hwid); }
-            if (i.commandName === 'black')   { store.set(hwid, { status: 'blacklist', decidedAt: now, decidedBy: i.user.tag }); return say('Blacklist: ' + hwid); }
-            if (i.commandName === 'unblack') { store.set(hwid, { status: 'pending', decidedAt: null }); return say('Fuera de blacklist: ' + hwid); }
-            if (i.commandName === 'remove')  { store.remove(hwid); return say('Borrado: ' + hwid); }
-            return;
+            const st = { accept: 'approved', deny: 'denied', reset: 'pending', black: 'blacklist', unblack: 'pending', remove: null }[i.commandName];
+            if (st) store.set(hwid, { status: st, decidedAt: now, decidedBy: i.user.tag });
+            else store.remove(hwid);
+            store.log(i.commandName, hwid, i.user.tag);
+            return say('OK: ' + i.commandName + ' ' + hwid);
           }
         }
       } catch (e) {
-        console.error('[bot] command:', e.message);
+        console.error('[bot] interaction:', e.message);
         try {
           if (i.deferred || i.replied) i.followUp({ content: 'Error: ' + e.message, ephemeral: true });
           else i.reply({ content: 'Error: ' + e.message, ephemeral: true });
@@ -349,7 +338,6 @@ function startBot(store) {
     catch (e) {
       state.lastError = e.message;
       if (/disallowed intents/i.test(e.message) && wantMsgContent) {
-        console.warn('[bot] intents privilegiados no habilitados -> reconecto solo con Guilds');
         try { client.destroy(); } catch {}
         wantMsgContent = false;
         client = build(false);
@@ -362,24 +350,15 @@ function startBot(store) {
   async function boot() {
     try { await connect(); }
     catch (e) {
-      state.lastError = e.message;
-      tries++;
+      state.lastError = e.message; tries++;
       const wait = Math.min(60000, 4000 * tries);
-      if (tries <= 10) {
-        console.error('[bot] login fallo (' + tries + '/10): ' + e.message + ' -> reintento en ' + (wait / 1000) + 's');
-        setTimeout(boot, wait);
-      } else console.error('[bot] login abandonado. Corre `npm run diagnose`.');
+      if (tries <= 10) { console.error('[bot] login fallo (' + tries + '/10): ' + e.message); setTimeout(boot, wait); }
+      else console.error('[bot] login abandonado -> npm run diagnose');
     }
   }
   boot();
 
-  return Promise.resolve({
-    notifyNew,
-    status: () => state,
-    isOnline: () => state.online,
-    guilds: () => state.guilds,
-    client: () => client
-  });
+  return Promise.resolve({ notifyNew, status: () => state, isOnline: () => state.online, guilds: () => state.guilds, client: () => client });
 }
 
 module.exports = { startBot, sanitizeToken, tokenBotId };
