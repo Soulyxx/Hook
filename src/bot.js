@@ -235,7 +235,7 @@ function startBot(store) {
             '`/accept` `/deny` `/reset` `/black` `/unblack` `/remove`'].join('\n'));
         }
 
-        if (i.commandName === 'diag') {
+if (i.commandName === 'diag') {
           const ch = await resolveChannel();
           return say({ embeds: [new EmbedBuilder().setTitle('Diagnostico')
             .addFields(
@@ -243,6 +243,7 @@ function startBot(store) {
               { name: 'Online', value: String(state.online), inline: true },
               { name: 'Guilds', value: String(state.guilds), inline: true },
               { name: 'Instancia', value: '`' + store.instance + '`', inline: true },
+              { name: 'Dominio', value: '`' + (process.env.RAILWAY_PUBLIC_DOMAIN || 'sin RAILWAY_PUBLIC_DOMAIN') + '`', inline: false },
               { name: 'Base', value: '`' + (store.file || '-') + '`', inline: false },
               { name: 'Escribible', value: String(store.writable), inline: true },
               { name: 'Usuarios', value: String(store.list().length), inline: true },

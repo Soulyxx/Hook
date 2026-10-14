@@ -14,24 +14,31 @@ function gate(secret) {
   };
 }
 
-module.exports = function apiRouter(store, secret, notify) {
+module.exports = function apiRouter(store, secret, notify, getBot) {
   const r = express.Router();
   const AUTO = () => !!process.env.AUTO_APPROVE;
+  const botState = () => {
+    const b = getBot && getBot();
+    return b ? (b.isOnline() ? 'online' : 'offline') : 'disabled';
+  };
 
-  /* sin gate: identifica el servidor y si exige secret */
+  /* --- SIN gate: identifica el servidor, su dominio y si tiene el bot --- */
   r.get('/ping', (_q, res) => res.json({
-    ok: true, service: 'hook-slx-auth', version: '3.0.0',
-    instanceId: store.instance, users: store.list().length,
-    secretRequired: !!secret, time: Date.now()
+    ok: true, service: 'hook-slx-auth', version: '4.0.0',
+    instanceId: store.instance,
+    domain: process.env.RAILWAY_PUBLIC_DOMAIN || process.env.PUBLIC_DOMAIN || '',
+    users: store.list().length,
+    pending: store.count('pending'),
+    bot: botState(),
+    secretRequired: !!secret,
+    time: Date.now()
   }));
 
   r.use(gate(secret));
 
-  const markNotified = (hwid) => store.set(hwid, { notifiedAt: Date.now() });
-
   function fire(u) {
     if (!notify) return;
-    markNotified(u.hwid);
+    store.set(u.hwid, { notifiedAt: Date.now() });
     try { notify('new', store.get(u.hwid)); } catch (e) { console.error('[api] notify:', e.message); }
   }
 
@@ -50,14 +57,14 @@ module.exports = function apiRouter(store, secret, notify) {
       store.log('register', hwid, name, { version });
       console.log('[api] NUEVO hwid=' + hwid + ' name=' + name + ' instancia=' + store.instance);
       fire(u);
-      return res.json({ ok: true, status: u.status, token: u.token, notified: true, instanceId: store.instance });
+      return res.json({ ok: true, status: u.status, token: u.token, notified: true, instanceId: store.instance, bot: botState() });
     }
 
     u = store.set(hwid, { name: name || u.name, version: version || u.version, lastSeen: Date.now() });
     let notified = false;
     if (u.status === 'pending' && !u.notifiedAt) { fire(u); notified = true; }
 
-    const base = { ok: true, instanceId: store.instance };
+    const base = { ok: true, instanceId: store.instance, bot: botState() };
     if (u.status === 'blacklist') return res.json({ ...base, status: 'denied', reason: 'blacklisted' });
     if (u.status === 'denied')    return res.json({ ...base, status: 'denied', reason: 'denied' });
     if (u.status === 'pending')   return res.json({ ...base, status: 'pending', token: u.token, notified });
@@ -67,21 +74,21 @@ module.exports = function apiRouter(store, secret, notify) {
   r.get('/verify', (req, res) => {
     const hwid = cleanHwid(req.query.hwid);
     const u = store.get(hwid);
-    if (!u) return res.json({ ok: true, status: 'unknown', instanceId: store.instance });
+    if (!u) return res.json({ ok: true, status: 'unknown', instanceId: store.instance, bot: botState() });
     const tok = String(req.query.token || '');
     if (u.token && tok && tok !== u.token) return res.json({ ok: true, status: 'pending', token: u.token, reason: 'bad_token' });
     store.set(hwid, { lastSeen: Date.now() });
     if (u.status === 'pending' && !u.notifiedAt) fire(u);
-    const base = { ok: true, instanceId: store.instance };
+    const base = { ok: true, instanceId: store.instance, bot: botState() };
     if (u.status === 'blacklist') return res.json({ ...base, status: 'denied', reason: 'blacklisted' });
     if (u.status === 'pending')   return res.json({ ...base, status: 'pending' });
     if (u.status === 'denied')    return res.json({ ...base, status: 'denied', reason: 'denied' });
     return res.json({ ...base, status: 'approved', token: u.token });
   });
 
-  /* mismo contenido que /diag del bot: sirve para comparar */
   r.get('/whoami', (_q, res) => res.json({
-    ok: true, instanceId: store.instance, db: store.file, writable: store.writable,
+    ok: true, instanceId: store.instance, domain: process.env.RAILWAY_PUBLIC_DOMAIN || '',
+    db: store.file, writable: store.writable, bot: botState(),
     users: store.list().length, pending: store.count('pending'), panel: store.metaGet('panelChannelId')
   }));
 
